@@ -2,7 +2,7 @@
 /**
  * Isolated PinkSoldier scene from 0beqz/realism-effects example/main.js.
  * Lighting, renderer, shadows, camera, post-processing and the GLB come from
- * the original demo. SSGI options are the exact values requested (README defaults).
+ * the original demo. SSGI sampling is tuned for the supplied daylight reference.
  */
 import * as POSTPROCESSING from "postprocessing"
 import { SSGIEffect, TRAAEffect, VelocityDepthNormalPass, SharpnessEffect } from "realism-effects"
@@ -19,24 +19,24 @@ import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js"
 import { DRACOLoader } from "three/examples/jsm/loaders/DRACOLoader.js"
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js"
 import { RGBELoader } from "three/examples/jsm/loaders/RGBELoader.js"
-import { toHalfFloat } from "three/src/extras/DataUtils.js"
+import { fromHalfFloat, toHalfFloat } from "three/src/extras/DataUtils.js"
 
-/** Exact SSGI values requested (realism-effects README defaults). */
+/** Daylight reference: stable indirect light and material reflections. */
 export const SSGI_OPTIONS = {
 	distance: 10,
 	thickness: 10,
-	denoiseIterations: 1,
+	denoiseIterations: 2,
 	denoiseKernel: 2,
 	denoiseDiffuse: 10,
 	denoiseSpecular: 10,
 	depthPhi: 2,
 	normalPhi: 50,
-	roughnessPhi: 1,
-	specularPhi: 1,
+	roughnessPhi: 20,
+	specularPhi: 20,
 	envBlur: 0.5,
 	importanceSampling: true,
-	steps: 20,
-	refineSteps: 5,
+	steps: 32,
+	refineSteps: 8,
 	resolutionScale: 1,
 	missedRays: false
 }
@@ -67,40 +67,41 @@ export function startPinkSoldier({ canvas, controlsEl, loadingEl }) {
 	const controls = new OrbitControls(camera, controlsEl)
 	controls.enableDamping = true
 
-	// Original demo: cameraY = 8.75, position [0, 8.75, 25], target [0, 8.75, 0].
-	// Offset yaw ~28° so the default frame matches the published PinkSoldier capture.
+	// Frontal reference framing; keep the original orbit interaction.
 	const cameraY = 8.75
-	camera.position.set(-10.6, 7.4, 18.8)
-	controls.target.set(0, 5.4, 0)
+	camera.position.set(0, cameraY, 25 * Math.max(1, 1 / camera.aspect))
+	controls.target.set(0, cameraY, 0)
 	controls.maxPolarAngle = Math.PI / 2
 	controls.minDistance = 5
 
 	const lightParams = {
 		yaw: 55,
-		pitch: 27,
-		intensity: 2.5
+		pitch: 48,
+		intensity: 1.5
 	}
 
 	const light = new DirectionalLight(0xffffff, lightParams.intensity)
 	light.castShadow = true
-	light.shadow.mapSize.width = 8192
-	light.shadow.mapSize.height = 8192
-	light.shadow.camera.near = 50
-	light.shadow.camera.far = 500
+	light.shadow.mapSize.width = 4096
+	light.shadow.mapSize.height = 4096
+	light.shadow.camera.near = 1
+	light.shadow.camera.far = 180
 	light.shadow.bias = -0.0001
-	const s = 100
+	light.shadow.normalBias = 0.025
+	light.shadow.radius = 2
+	const s = 24
 	light.shadow.camera.left = -s
 	light.shadow.camera.bottom = -s
 	light.shadow.camera.right = s
 	light.shadow.camera.top = s
 	light.updateMatrixWorld()
-	// Original example/main.js leaves `scene.add(light)` commented out.
-	// Lighting is IBL (spree_bank HDR) + SSGI. Adding the sun double-lights
-	// the glossy baseplate and does not match the published capture.
-	// scene.add(light)
+	// Direct sunlight supplies the reference's directional cast shadows.
+	scene.add(light)
+	scene.add(light.target)
 
+	renderer.shadowMap.type = THREE.PCFSoftShadowMap
 	renderer.shadowMap.enabled = true
-	renderer.shadowMap.autoUpdate = false
+	renderer.shadowMap.autoUpdate = true
 	renderer.shadowMap.needsUpdate = true
 
 	if (scene.getObjectByProperty("isDirectionalLight", true)) {
@@ -113,6 +114,8 @@ export function startPinkSoldier({ canvas, controlsEl, loadingEl }) {
 		light.position.y = Math.sin(lightParams.pitch * toRad)
 		light.position.z = Math.cos(lightParams.yaw * toRad) * Math.cos(lightParams.pitch * toRad)
 		light.position.normalize().multiplyScalar(75)
+		light.target.position.set(0, 6, 0)
+		light.target.updateMatrixWorld()
 		light.updateMatrixWorld()
 		renderer.shadowMap.needsUpdate = true
 	}
@@ -138,7 +141,11 @@ export function startPinkSoldier({ canvas, controlsEl, loadingEl }) {
 
 	const resize = () => {
 		if (disposed) return
+		const previousAspect = camera.aspect
 		camera.aspect = window.innerWidth / window.innerHeight
+		const previousFit = Math.max(1, 1 / previousAspect)
+		const nextFit = Math.max(1, 1 / camera.aspect)
+		camera.position.sub(controls.target).multiplyScalar(nextFit / previousFit).add(controls.target)
 		camera.updateProjectionMatrix()
 		const dpr = window.devicePixelRatio
 		renderer.setPixelRatio(Math.min(2, dpr))
@@ -187,6 +194,7 @@ export function startPinkSoldier({ canvas, controlsEl, loadingEl }) {
 			if (c.isMesh) {
 				c.castShadow = c.receiveShadow = true
 				c.material.depthWrite = true
+				c.material.envMapIntensity = 0.65
 			}
 			c.frustumCulled = false
 		})
@@ -214,13 +222,13 @@ export function startPinkSoldier({ canvas, controlsEl, loadingEl }) {
 	}
 
 	const addBaseplate = () => {
-		// Original ground: PlaneGeometry(100,100), MeshStandardMaterial metalness 0 roughness 0.
-		// Enlarged so the isolated shot never shows the plane edge.
+		// Preserve the existing ground; suppress the artificial mirror finish.
 		const ground = new THREE.Mesh(
 			new THREE.PlaneGeometry(400, 400),
 			new THREE.MeshStandardMaterial({
+				color: new Color(0.48, 0.48, 0.48),
 				metalness: 0,
-				roughness: 0
+				roughness: 0.85
 			})
 		)
 		ground.rotation.x = -Math.PI / 2
@@ -233,7 +241,7 @@ export function startPinkSoldier({ canvas, controlsEl, loadingEl }) {
 
 	const initScene = async () => {
 		renderer.toneMapping = THREE.ACESFilmicToneMapping
-		renderer.toneMappingExposure = 1.5
+		renderer.toneMappingExposure = 1.0
 
 		const velocityDepthNormalPass = new VelocityDepthNormalPass(scene, camera)
 		composer.addPass(velocityDepthNormalPass)
@@ -248,10 +256,10 @@ export function startPinkSoldier({ canvas, controlsEl, loadingEl }) {
 		})
 
 		const bloomEffect = new POSTPROCESSING.BloomEffect({
-			intensity: 1,
+			intensity: 0.12,
 			mipmapBlur: true,
 			luminanceSmoothing: 0.5,
-			luminanceThreshold: 0.75,
+			luminanceThreshold: 1.25,
 			kernelSize: POSTPROCESSING.KernelSize.MEDIUM
 		})
 
@@ -264,6 +272,7 @@ export function startPinkSoldier({ canvas, controlsEl, loadingEl }) {
 		if (disposed) return
 		convertFloat32TextureToHalfFloat(lutTexture)
 		const lutEffect = new POSTPROCESSING.LUT3DEffect(lutTexture)
+		lutEffect.blendMode.opacity.value = 0.35
 		const toneMappingEffect = new POSTPROCESSING.ToneMappingEffect()
 		toneMappingEffect.mode = POSTPROCESSING.ToneMappingMode.ACES_FILMIC
 		const sharpnessEffect = new SharpnessEffect({ sharpness: 0.75 })
@@ -282,6 +291,15 @@ export function startPinkSoldier({ canvas, controlsEl, loadingEl }) {
 			"/hdr/spree_bank_1k.hdr",
 			envMap => {
 				scene.environment?.dispose()
+				// Reduce overbright city HDR fill while preserving the original asset.
+				const data = envMap.image.data
+				for (let i = 0; i < data.length; i += 4) {
+					for (let channel = 0; channel < 3; channel++) {
+						const value = envMap.type === THREE.HalfFloatType ? fromHalfFloat(data[i + channel]) : data[i + channel]
+						data[i + channel] = envMap.type === THREE.HalfFloatType ? toHalfFloat(value * 0.35) : value * 0.35
+					}
+				}
+				envMap.needsUpdate = true
 				envMap.mapping = EquirectangularReflectionMapping
 				scene.environment = envMap
 				resolve(envMap)
